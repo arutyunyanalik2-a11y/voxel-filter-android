@@ -8,7 +8,7 @@ use std::sync::Mutex;
 lazy_static::lazy_static! {
     static ref BLOCKED_DOMAINS: Mutex<HashSet<String>> = {
         let mut set = HashSet::new();
-        // Сюда можно добавлять домены для блокировки (в будущем загрузим большой список)
+        // Черный список 18+ доменов
         set.insert("example-adult-site.com".to_string());
         set.insert("bad-content-domain.net".to_string());
         set.insert("pornhub.com".to_string());
@@ -22,21 +22,25 @@ lazy_static::lazy_static! {
         set.insert("epornreview.com".to_string());
         set.insert("nutaku.net".to_string());
         set.insert("pornlist18.com".to_string());
-                Mutex::new(set)
+        Mutex::new(set)
     };
 }
 
 /// Функция проверки домена: возвращает true, если домен заблокирован (18+)
 pub fn is_domain_blocked(domain: &str) -> bool {
+    let clean_domain = domain.trim().to_lowercase();
     let list = BLOCKED_DOMAINS.lock().unwrap();
-    // Проверяем точное совпадение или вхождение домена в черный список
-    list.iter().any(|bad_domain| domain.contains(bad_domain))
+    
+    // Безопасная проверка: точное совпадение или принадлежность поддомену
+    list.iter().any(|bad_domain| {
+        clean_domain == *bad_domain || clean_domain.ends_with(&format!(".{}", bad_domain))
+    })
 }
 
-
-
+// ВНИМАНИЕ: Имя функции должно в точности соответствовать пакету com.filter 
+// и классу VpnFilterService, где объявлена external fun checkDomainNative
 #[no_mangle]
-pub extern "system" fn Java_com_filter_VpnCore_checkDomainNative(
+pub extern "system" fn Java_com_filter_VpnFilterService_checkDomainNative(
     mut env: JNIEnv,
     _class: jni::objects::JClass,
     domain_jstring: JString,

@@ -3,6 +3,7 @@ package com.filter
 import android.content.Intent
 import android.net.VpnService
 import android.os.ParcelFileDescriptor
+import android.util.Log
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
@@ -12,14 +13,12 @@ class VpnFilterService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
     private var isRunning = false
 
-    companion object {
+    companion {
         init {
-            // Загружаем нашу скомпилированную Rust-библиотеку
             System.loadLibrary("core_rust")
         }
     }
 
-    // Объявляем нативную функцию из Rust, которая проверяет домен
     external fun checkDomainNative(domain: String): Boolean
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -39,7 +38,6 @@ class VpnFilterService : VpnService() {
 
         vpnInterface = builder.establish()
         
-        // Запускаем поток обработки пакетов в фоне
         Thread {
             runVpnLoop()
         }.start()
@@ -48,18 +46,69 @@ class VpnFilterService : VpnService() {
     private fun runVpnLoop() {
         val descriptor = vpnInterface ?: return
         val inputStream = FileInputStream(descriptor.fileDescriptor)
+        val outputStream = FileOutputStream(descriptor.fileDescriptor)
         val buffer = ByteBuffer.allocate(32767)
 
         try {
             while (isRunning) {
                 val length = inputStream.read(buffer.array())
                 if (length > 0) {
-                    // Здесь в будущем можно детально парсить DNS/IP пакеты, 
-                    // а пока движок готов принимать запросы.
+                    val packet = buffer.array()
+                    
+                    // Простая проверка IPv4 и UDP (порт 53 - DNS)
+                    if (isDnsPacket(packet, length)) {
+                        val domain = extractDomainFromDns(packet, length)
+                        if (domain != null) {
+                            val isBlocked = checkDomainNative(domain)
+                            if (isBlocked) {
+                                Log.d("VpnFilter", "Заблокирован 18+ домен: $domain")
+                                buffer.clear()
+                                continue // Сбрасываем пакет, не передавая его далее
+                            }
+                        }
+                    }
+
+                    // Если пакет чистый — пересылаем обратно в систему
+                    outputStream.write(packet, 0, length)
+                    buffer.clear()
                 }
             }
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e("VpnFilter", "Ошибка в loop: ${e.message}")
+        }
+    }
+
+    private fun isDnsPacket(packet: ByteArray, length: Int): Boolean {
+        if (length < 28) return false
+        val ipHeaderLength = (packet[0].toInt() and 0x0F) * 4
+        val protocol = packet[9].toInt() and 0xFF
+        if (protocol != 17) return false // UDP = 17
+
+        val destinationPort = ((packet[ipHeaderLength + 2].toInt() and 0xFF) shl 8) or
+                              (packet[ipHeaderLength + 3].toInt() and 0xFF)
+        return destinationPort == 53
+    }
+
+    private fun extractDomainFromDns(packet: ByteArray, length: Int): String? {
+        try {
+            val ipHeaderLength = (packet[0].toInt() and 0x0F) * 4
+            var dnsOffset = ipHeaderLength + 8 + 12 // IP + UDP header + DNS header
+            
+            val domainBuilder = StringBuilder()
+            while (dnsOffset < length) {
+                val labelLength = packet[dnsOffset].toInt() and 0xFF
+                if (labelLength == 0) break
+                
+                if (domainBuilder.isNotEmpty()) domainBuilder.append(".")
+                for (i in 0 until labelLength) {
+                    dnsOffset++
+                    domainBuilder.append(packet[dnsOffset].toInt().toChar())
+                }
+                dnsOffset++
+            }
+            return if (domainBuilder.isNotEmpty()) domainBuilder.toString() else null
+        } catch (e: Exception) {
+            return null
         }
     }
 
