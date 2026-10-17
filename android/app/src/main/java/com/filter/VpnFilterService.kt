@@ -30,17 +30,28 @@ class VpnFilterService : VpnService() {
     }
 
     private fun startVpn() {
-        val builder = Builder()
-            .setSession("System Filter 18+")
-            .addAddress("10.0.0.2", 24)
-            .addDnsServer("8.8.8.8")
-            .addRoute("0.0.0.0", 0)
+        try {
+            val builder = Builder()
+                .setSession("System Filter 18+")
+                .addAddress("10.0.0.2", 24)
+                .addDnsServer("8.8.8.8")
+                // Перенаправляем только DNS (порт 53), чтобы система стабильно держала туннель
+                .addRoute("8.8.8.8", 32) 
 
-        vpnInterface = builder.establish()
-        
-        Thread {
-            runVpnLoop()
-        }.start()
+            vpnInterface = builder.establish()
+
+            if (vpnInterface == null) {
+                Log.e("VpnFilter", "Ошибка: builder.establish() вернул null. VPN не запущен.")
+                return
+            }
+
+            Log.i("VpnFilter", "VPN успешно активирован!")
+            Thread {
+                runVpnLoop()
+            }.start()
+        } catch (e: Exception) {
+            Log.e("VpnFilter", "Исключение при старте VPN: ${e.message}")
+        }
     }
 
     private fun runVpnLoop() {
@@ -55,30 +66,16 @@ class VpnFilterService : VpnService() {
                 if (length > 0) {
                     val packet = buffer.array()
                     
-                    var blocked = false
-                    // 1. Проверяем DNS (порт 53)
+                    // Перехватываем и проверяем DNS-запросы
                     if (isDnsPacket(packet, length)) {
                         val domain = extractDomainFromDns(packet, length)
                         if (domain != null && checkDomainNative(domain)) {
-                            Log.d("VpnFilter", "Заблокирован по DNS: $domain")
-                            blocked = true
-                        }
-                    } 
-                    // 2. Проверяем HTTPS / TLS SNI (порт 443)
-                    else if (isTlsClientHello(packet, length)) {
-                        val domain = extractTlsSni(packet, length)
-                        if (domain != null && checkDomainNative(domain)) {
-                            Log.d("VpnFilter", "Заблокирован по SNI (HTTPS): $domain")
-                            blocked = true
+                            Log.d("VpnFilter", "Заблокирован домен: $domain")
+                            buffer.clear()
+                            continue // Блокируем пакет
                         }
                     }
 
-                    if (blocked) {
-                        buffer.clear()
-                        continue // Сбрасываем пакет (блокируем)
-                    }
-
-                    // Пропускаем чистый трафик дальше
                     outputStream.write(packet, 0, length)
                     buffer.clear()
                 }
@@ -88,63 +85,11 @@ class VpnFilterService : VpnService() {
         }
     }
 
-    private fun isTlsClientHello(packet: ByteArray, length: Int): Boolean {
-        if (length < 40) return false
-        val ipHeaderLength = (packet[0].toInt() and 0x0F) * 4
-        val protocol = packet[9].toInt() and 0xFF
-        if (protocol != 6) return false // TCP = 6
-
-        val tcpHeaderLength = ((packet[ipHeaderLength + 12].toInt() and 0xF0) shr 4) * 4
-        val payloadOffset = ipHeaderLength + tcpHeaderLength
-        if (length <= payloadOffset + 5) return false
-
-        val contentType = packet[payloadOffset].toInt() and 0xFF
-        val handshakeType = packet[payloadOffset + 5].toInt() and 0xFF
-        return contentType == 22 && handshakeType == 1
-    }
-
-    private fun extractTlsSni(packet: ByteArray, length: Int): String? {
-        try {
-            val ipHeaderLength = (packet[0].toInt() and 0x0F) * 4
-            val tcpHeaderLength = ((packet[ipHeaderLength + 12].toInt() and 0xF0) shr 4) * 4
-            var offset = ipHeaderLength + tcpHeaderLength + 5 + 4 + 2 + 32 + 1
-            
-            val sessionIDLength = packet[offset].toInt() and 0xFF
-            offset += 1 + sessionIDLength
-            
-            val cipherSuitesLength = ((packet[offset].toInt() and 0xFF) shl 8) or (packet[offset + 1].toInt() and 0xFF)
-            offset += 2 + cipherSuitesLength
-            
-            val compressionLength = packet[offset].toInt() and 0xFF
-            offset += 1 + compressionLength
-            
-            offset += 2
-            
-            while (offset < length - 4) {
-                val extType = ((packet[offset].toInt() and 0xFF) shl 8) or (packet[offset + 1].toInt() and 0xFF)
-                val extLen = ((packet[offset + 2].toInt() and 0xFF) shl 8) or (packet[offset + 3].toInt() and 0xFF)
-                offset += 4
-                
-                if (extType == 0) { // SNI
-                    val serverNameListLen = ((packet[offset].toInt() and 0xFF) shl 8) or (packet[offset + 1].toInt() and 0xFF)
-                    val serverNameType = packet[offset + 2].toInt() and 0xFF
-                    if (serverNameType == 0) {
-                        val hostNameLen = ((packet[offset + 3].toInt() and 0xFF) shl 8) or (packet[offset + 4].toInt() and 0xFF)
-                        val hostBytes = packet.copyOfRange(offset + 5, offset + 5 + hostNameLen)
-                        return String(hostBytes, Charsets.UTF_8)
-                    }
-                }
-                offset += extLen
-            }
-        } catch (e: Exception) {}
-        return null
-    }
-
     private fun isDnsPacket(packet: ByteArray, length: Int): Boolean {
         if (length < 28) return false
         val ipHeaderLength = (packet[0].toInt() and 0x0F) * 4
         val protocol = packet[9].toInt() and 0xFF
-        if (protocol != 17) return false
+        if (protocol != 17) return false // UDP
 
         val destinationPort = ((packet[ipHeaderLength + 2].toInt() and 0xFF) shl 8) or
                               (packet[ipHeaderLength + 3].toInt() and 0xFF)
