@@ -13,12 +13,14 @@ class VpnFilterService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
     private var isRunning = false
 
-    companion {
+    companion object {
         init {
+            // Загружаем скомпилированную Rust-библиотеку
             System.loadLibrary("core_rust")
         }
     }
 
+    // Нативная функция из Rust-ядра для проверки доменов
     external fun checkDomainNative(domain: String): Boolean
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -55,20 +57,20 @@ class VpnFilterService : VpnService() {
                 if (length > 0) {
                     val packet = buffer.array()
                     
-                    // Простая проверка IPv4 и UDP (порт 53 - DNS)
+                    // Проверяем, является ли пакет DNS-запросом (порт 53)
                     if (isDnsPacket(packet, length)) {
                         val domain = extractDomainFromDns(packet, length)
                         if (domain != null) {
                             val isBlocked = checkDomainNative(domain)
                             if (isBlocked) {
-                                Log.d("VpnFilter", "Заблокирован 18+ домен: $domain")
+                                Log.d("VpnFilter", "Заблокирован 18+ сайт: $domain")
                                 buffer.clear()
-                                continue // Сбрасываем пакет, не передавая его далее
+                                continue // Пропускаем отправку пакета (блокируем)
                             }
                         }
                     }
 
-                    // Если пакет чистый — пересылаем обратно в систему
+                    // Пересылаем разрешенный трафик дальше в систему
                     outputStream.write(packet, 0, length)
                     buffer.clear()
                 }
@@ -92,7 +94,7 @@ class VpnFilterService : VpnService() {
     private fun extractDomainFromDns(packet: ByteArray, length: Int): String? {
         try {
             val ipHeaderLength = (packet[0].toInt() and 0x0F) * 4
-            var dnsOffset = ipHeaderLength + 8 + 12 // IP + UDP header + DNS header
+            var dnsOffset = ipHeaderLength + 8 + 12 // IP + UDP + DNS заголовки
             
             val domainBuilder = StringBuilder()
             while (dnsOffset < length) {
