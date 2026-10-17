@@ -30,16 +30,15 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // --- Создаем интерфейс программно с сине-оранжевым градиентом ---
+        // --- Создаем интерфейс программно с сине-оранжевым градиентом Voxel Rivo ---
         mainLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(64, 128, 64, 128)
             gravity = android.view.Gravity.CENTER
             
-            // Линейный градиент от глубокого синего rgb(17, 0, 255) к яркому оранжевому rgba(255, 157, 0, 1)
             val gradient = GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
-                intArayOf(
+                intArrayOf( // Исправлено: intArrayOf вместо intArayOf
                     Color.rgb(17, 0, 255),
                     Color.rgb(255, 157, 0)
                 )
@@ -69,7 +68,6 @@ class MainActivity : AppCompatActivity() {
             textSize = 18f
             setTextColor(Color.rgb(17, 0, 255))
             
-            // Стильная белая полупрозрачная кнопка с закругленными углами
             val buttonBg = GradientDrawable().apply {
                 setColor(Color.WHITE)
                 cornerRadius = 48f
@@ -125,7 +123,4 @@ class MainActivity : AppCompatActivity() {
             toggleButton.text = "Включить защиту"
         }
     }
-
-    // Вспомогательная функция для массива цветов
-    private fun intArayOf(vararg elements: Int): IntArray = elements
 }
