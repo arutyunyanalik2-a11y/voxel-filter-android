@@ -22,6 +22,7 @@ lazy_static::lazy_static! {
         set.insert("epornreview.com".to_string());
         set.insert("nutaku.net".to_string());
         set.insert("pornlist18.com".to_string());
+        set.insert("cherry.ai".to_string());
         Mutex::new(set)
     };
 }
