@@ -1,9 +1,14 @@
 package com.filter
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.Intent
 import android.net.VpnService
+import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
+import androidx.core.app.NotificationCompat
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
@@ -17,6 +22,8 @@ class VpnFilterService : VpnService() {
         init {
             System.loadLibrary("core_rust")
         }
+        private const val CHANNEL_ID = "VpnFilterChannel"
+        private const val NOTIFICATION_ID = 1
     }
 
     external fun checkDomainNative(domain: String): Boolean
@@ -24,9 +31,31 @@ class VpnFilterService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (!isRunning) {
             isRunning = true
+            startForegroundServiceWithNotification()
             startVpn()
         }
         return START_STICKY
+    }
+
+    private fun startForegroundServiceWithNotification() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "Voxel Rivo Protection",
+                NotificationManager.IMPORTANCE_LOW
+            )
+            val manager = getSystemService(NotificationManager::class.java)
+            manager?.createNotificationChannel(channel)
+        }
+
+        val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("Voxel Rivo Filter")
+            .setContentText("Защита 18+ активна и фильтрует трафик")
+            .setSmallIcon(android.R.drawable.ic_lock_lock)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
+
+        startForeground(NOTIFICATION_ID, notification)
     }
 
     private fun startVpn() {
@@ -35,8 +64,7 @@ class VpnFilterService : VpnService() {
                 .setSession("System Filter 18+")
                 .addAddress("10.0.0.2", 24)
                 .addDnsServer("8.8.8.8")
-                // Перенаправляем только DNS (порт 53), чтобы система стабильно держала туннель
-                .addRoute("8.8.8.8", 32) 
+                .addRoute("8.8.8.8", 32)
 
             vpnInterface = builder.establish()
 
@@ -66,13 +94,12 @@ class VpnFilterService : VpnService() {
                 if (length > 0) {
                     val packet = buffer.array()
                     
-                    // Перехватываем и проверяем DNS-запросы
                     if (isDnsPacket(packet, length)) {
                         val domain = extractDomainFromDns(packet, length)
                         if (domain != null && checkDomainNative(domain)) {
                             Log.d("VpnFilter", "Заблокирован домен: $domain")
                             buffer.clear()
-                            continue // Блокируем пакет
+                            continue
                         }
                     }
 
@@ -89,7 +116,7 @@ class VpnFilterService : VpnService() {
         if (length < 28) return false
         val ipHeaderLength = (packet[0].toInt() and 0x0F) * 4
         val protocol = packet[9].toInt() and 0xFF
-        if (protocol != 17) return false // UDP
+        if (protocol != 17) return false
 
         val destinationPort = ((packet[ipHeaderLength + 2].toInt() and 0xFF) shl 8) or
                               (packet[ipHeaderLength + 3].toInt() and 0xFF)
