@@ -38,16 +38,14 @@ jobs:
         cd core-rust
         cargo build --target aarch64-linux-android --release
 
-        - name: Build Android APK (Debug)
-        run: |
-          cd android
-          # Скачиваем стабильный Gradle 8.5 напрямую, чтобы исключить любые конфликты версий
-          wget https://services.gradle.org/distributions/gradle-8.5-bin.zip
-          unzip -q gradle-8.5-bin.zip
-          # Запускаем сборку через скачанный gradle 8.5
-          ./gradle-8.5/bin/gradle wrapper --gradle-version 8.5
-          chmod +x gradlew
-          ./gradlew assembleDebug
+    - name: Build Android APK (Debug)
+      run: |
+        cd android
+        wget https://services.gradle.org/distributions/gradle-8.5-bin.zip
+        unzip -q gradle-8.5-bin.zip
+        ./gradle-8.5/bin/gradle wrapper --gradle-version 8.5
+        chmod +x gradlew
+        ./gradlew assembleDebug
 
     - name: Upload APK artifact
       uses: actions/upload-artifact@v4
