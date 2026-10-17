@@ -41,10 +41,7 @@ jobs:
     - name: Build Android APK (Debug)
       run: |
         cd android
-        # Если gradlew отсутствует, генерируем его автоматически
-        if [ ! -f "gradlew" ]; then
-          gradle wrapper
-        fi
+        gradle wrapper --gradle-version 8.5
         chmod +x gradlew
         ./gradlew assembleDebug
 
