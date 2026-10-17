@@ -30,8 +30,9 @@ jobs:
     - name: Install Android NDK & Toolchain
       run: |
         echo "y" | sudo ${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager --install "ndk;25.2.9519653"
-        NDK_PATH="${ANDROID_SDK_ROOT}/ndk/25.2.9519653/toolchains/llvm/prebuilt/linux-x86_64/bin"
-        echo "$NDK_PATH" >> $GITHUB_PATH
+        NDK_PATH="${ANDROID_SDK_ROOT}/ndk/25.2.9519653"
+        echo "ndk.dir=$NDK_PATH" >> android/local.properties
+        echo "$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
 
     - name: Build Rust Core
       run: |
@@ -45,7 +46,7 @@ jobs:
         unzip -q gradle-8.5-bin.zip
         ./gradle-8.5/bin/gradle wrapper --gradle-version 8.5
         chmod +x gradlew
-        ./gradlew assembleDebug --stacktrace
+        ./gradlew assembleDebug
 
     - name: Upload APK artifact
       uses: actions/upload-artifact@v4
