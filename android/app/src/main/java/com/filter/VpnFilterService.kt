@@ -12,7 +12,7 @@ class VpnFilterService : VpnService() {
     private var vpnInterface: ParcelFileDescriptor? = null
     private var isRunning = false
 
-    companion5 object {
+    companion object {
         init {
             // Загружаем нашу скомпилированную Rust-библиотеку
             System.loadLibrary("core_rust")
