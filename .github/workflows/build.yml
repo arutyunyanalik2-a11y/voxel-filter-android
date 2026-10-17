@@ -45,7 +45,7 @@ jobs:
         unzip -q gradle-8.5-bin.zip
         ./gradle-8.5/bin/gradle wrapper --gradle-version 8.5
         chmod +x gradlew
-        ./gradlew assembleDebug
+        ./gradlew assembleDebug --stacktrace
 
     - name: Upload APK artifact
       uses: actions/upload-artifact@v4
