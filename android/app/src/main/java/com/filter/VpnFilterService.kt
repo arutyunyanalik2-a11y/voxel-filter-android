@@ -11,12 +11,15 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.InetAddress
 import java.nio.ByteBuffer
 
 class VpnFilterService : VpnService() {
 
     private var vpnInterface: ParcelFileDescriptor? = null
-    private var isRunning = false
+    @Volatile private var isRunning = false
 
     companion object {
         init {
@@ -29,6 +32,12 @@ class VpnFilterService : VpnService() {
     external fun checkDomainNative(domain: String): Boolean
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val action = intent?.action
+        if (action == "STOP_VPN") {
+            stopVpn()
+            return START_NOT_STICKY
+        }
+
         if (!isRunning) {
             isRunning = true
             startForegroundServiceWithNotification()
@@ -50,7 +59,7 @@ class VpnFilterService : VpnService() {
 
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Voxel Rivo Filter")
-            .setContentText("Защита 18+ активна и фильтрует трафик")
+            .setContentText("Защита 18+ активна")
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
@@ -69,16 +78,14 @@ class VpnFilterService : VpnService() {
             vpnInterface = builder.establish()
 
             if (vpnInterface == null) {
-                Log.e("VpnFilter", "Ошибка: builder.establish() вернул null. VPN не запущен.")
+                Log.e("VpnFilter", "builder.establish() returned null")
                 return
             }
 
-            Log.i("VpnFilter", "VPN успешно активирован!")
-            Thread {
-                runVpnLoop()
-            }.start()
+            Log.i("VpnFilter", "VPN Tunnel active")
+            Thread { runVpnLoop() }.start()
         } catch (e: Exception) {
-            Log.e("VpnFilter", "Исключение при старте VPN: ${e.message}")
+            Log.e("VpnFilter", "Error starting VPN: ${e.message}")
         }
     }
 
@@ -86,29 +93,28 @@ class VpnFilterService : VpnService() {
         val descriptor = vpnInterface ?: return
         val inputStream = FileInputStream(descriptor.fileDescriptor)
         val outputStream = FileOutputStream(descriptor.fileDescriptor)
-        val buffer = ByteBuffer.allocate(32767)
+        val buffer = ByteArray(32767)
 
         try {
             while (isRunning) {
-                val length = inputStream.read(buffer.array())
+                val length = inputStream.read(buffer)
                 if (length > 0) {
-                    val packet = buffer.array()
-                    
-                    if (isDnsPacket(packet, length)) {
-                        val domain = extractDomainFromDns(packet, length)
+                    if (isDnsPacket(buffer, length)) {
+                        val domain = extractDomainFromDns(buffer, length)
                         if (domain != null && checkDomainNative(domain)) {
-                            Log.d("VpnFilter", "Заблокирован домен: $domain")
-                            buffer.clear()
+                            Log.d("VpnFilter", "Blocked 18+ domain: $domain")
+                            // Блокируем: просто не ответим на DNS запрос
                             continue
                         }
                     }
-
-                    outputStream.write(packet, 0, length)
-                    buffer.clear()
+                    // Разрешенные DNS запросы и обычный трафик возвращаем в интерфейс
+                    outputStream.write(buffer, 0, length)
                 }
             }
         } catch (e: Exception) {
-            Log.e("VpnFilter", "Ошибка в loop: ${e.message}")
+            if (isRunning) {
+                Log.e("VpnFilter", "VPN loop error: ${e.message}")
+            }
         }
     }
 
@@ -116,7 +122,7 @@ class VpnFilterService : VpnService() {
         if (length < 28) return false
         val ipHeaderLength = (packet[0].toInt() and 0x0F) * 4
         val protocol = packet[9].toInt() and 0xFF
-        if (protocol != 17) return false
+        if (protocol != 17) return false // UDP
 
         val destinationPort = ((packet[ipHeaderLength + 2].toInt() and 0xFF) shl 8) or
                               (packet[ipHeaderLength + 3].toInt() and 0xFF)
@@ -146,10 +152,25 @@ class VpnFilterService : VpnService() {
         }
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
+    private fun stopVpn() {
         isRunning = false
-        vpnInterface?.close()
-        vpnInterface = null
+        try {
+            vpnInterface?.close()
+            vpnInterface = null
+        } catch (e: Exception) {
+            Log.e("VpnFilter", "Error closing interface: ${e.message}")
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(true)
+        }
+        stopSelf()
+    }
+
+    override fun onDestroy() {
+        stopVpn()
+        super.onDestroy()
     }
 }

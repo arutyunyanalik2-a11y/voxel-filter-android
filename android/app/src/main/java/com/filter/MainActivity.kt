@@ -30,7 +30,6 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // --- Создаем интерфейс программно с сине-оранжевым градиентом Voxel Rivo ---
         mainLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(64, 128, 64, 128)
@@ -38,7 +37,7 @@ class MainActivity : AppCompatActivity() {
             
             val gradient = GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf( // Исправлено: intArrayOf вместо intArayOf
+                intArrayOf(
                     Color.rgb(17, 0, 255),
                     Color.rgb(255, 157, 0)
                 )
@@ -108,8 +107,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun stopVpnService() {
-        val intent = Intent(this, VpnFilterService::class.java)
-        stopService(intent)
+        val intent = Intent(this, VpnFilterService::class.java).apply {
+            action = "STOP_VPN"
+        }
+        startService(intent)
         isVpnActive = false
         updateUiState()
     }
