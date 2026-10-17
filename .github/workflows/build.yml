@@ -39,6 +39,11 @@ jobs:
         cd core-rust
         cargo build --target aarch64-linux-android --release
 
+    - name: Copy Native Library to Android jniLibs
+      run: |
+        mkdir -p android/app/src/main/jniLibs/arm64-v8a
+        cp core-rust/target/aarch64-linux-android/release/libcore_rust.so android/app/src/main/jniLibs/arm64-v8a/
+
     - name: Generate Debug Keystore
       run: |
           keytool -genkey -v -keystore android/app/debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug, OU=Android, O=Android, L=Unknown, ST=Unknown, C=US"
