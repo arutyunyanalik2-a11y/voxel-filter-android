@@ -20,14 +20,18 @@ class VpnFilterService : VpnService() {
 
     private var vpnInterface: ParcelFileDescriptor? = null
     @Volatile private var isRunning = false
-    private val executor = Executors.newCachedThreadPool()
+    private val executor = Executors.newFixedThreadPool(16)
+    private val writeLock = Any()
 
     companion object {
         init {
             System.loadLibrary("core_rust")
         }
+        private const val TAG = "VpnFilter"
         private const val CHANNEL_ID = "VoxelRivoChannel"
         private const val NOTIFICATION_ID = 1
+        private const val VPN_ADDRESS = "10.0.0.2"
+        private const val UPSTREAM_DNS = "8.8.8.8"
     }
 
     external fun checkDomainNative(domain: String): Boolean
@@ -53,8 +57,7 @@ class VpnFilterService : VpnService() {
                 "Voxel Rivo Protection",
                 NotificationManager.IMPORTANCE_LOW
             )
-            val manager = getSystemService(NotificationManager::class.java)
-            manager?.createNotificationChannel(channel)
+            getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
         }
 
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
@@ -69,23 +72,27 @@ class VpnFilterService : VpnService() {
 
     private fun startVpn() {
         try {
+            // Маршрутизируем в туннель ТОЛЬКО трафик к нашему DNS (10.0.0.2).
+            // Весь остальной трафик идёт мимо VPN напрямую.
             val builder = Builder()
                 .setSession("Voxel Rivo Filter")
-                .addAddress("10.0.0.2", 24)
-                .addDnsServer("10.0.0.2")
-                .addRoute("10.0.0.2", 32)
+                .addAddress(VPN_ADDRESS, 24)
+                .addDnsServer(VPN_ADDRESS)
+                .addRoute(VPN_ADDRESS, 32)
 
             vpnInterface = builder.establish()
 
             if (vpnInterface == null) {
-                Log.e("VpnFilter", "builder.establish() returned null")
+                Log.e(TAG, "builder.establish() returned null")
+                isRunning = false
                 return
             }
 
-            Log.i("VpnFilter", "DNS VPN Tunnel active")
+            Log.i(TAG, "DNS VPN Tunnel active")
             Thread { runVpnLoop() }.start()
         } catch (e: Exception) {
-            Log.e("VpnFilter", "Error starting VPN: ${e.message}")
+            Log.e(TAG, "Error starting VPN: ${e.message}")
+            isRunning = false
         }
     }
 
@@ -98,72 +105,82 @@ class VpnFilterService : VpnService() {
         try {
             while (isRunning) {
                 val length = inputStream.read(buffer)
-                if (length > 0) {
-                    val packet = buffer.copyOf(length)
-                    
-                    if (isDnsPacket(packet, length)) {
-                        val domain = extractDomainFromDns(packet, length)
-                        if (domain != null) {
-                            val cleanDomain = domain.lowercase()
+                if (length <= 0) continue
 
-                            // Единственная проверка: если домен в черном списке Rust — блокируем
-                            if (checkDomainNative(cleanDomain)) {
-                                Log.d("VpnFilter", "BLOCKED 18+ domain: $cleanDomain")
-                                continue // Не отвечаем на запрос, сайт блокируется
-                            }
-                        }
+                val packet = buffer.copyOf(length)
 
-                        // Все остальные сайты и приложения мгновенно проксируем в интернет
-                        executor.submit {
-                            proxyDnsQuery(packet, length, outputStream)
-                        }
-                    } else {
-                        // Не-DNS трафик пропускаем напрямую
-                        outputStream.write(packet, 0, length)
+                // Всё, что не является UDP DNS-запросом, отбрасываем
+                if (!isDnsPacket(packet, length)) continue
+
+                val domain = extractDomainFromDns(packet, length)
+                if (domain != null && checkDomainNative(domain.lowercase())) {
+                    Log.d(TAG, "BLOCKED 18+ domain: $domain")
+                    // Отвечаем NXDOMAIN, чтобы приложение сразу получило ошибку, а не ждало таймаут
+                    val nx = buildNxDomainPayload(packet, length)
+                    if (nx != null) {
+                        val response = buildDnsResponsePacket(packet, nx)
+                        synchronized(writeLock) { outputStream.write(response) }
                     }
+                    continue
                 }
+
+                executor.submit { proxyDnsQuery(packet, length, outputStream) }
             }
         } catch (e: Exception) {
-            if (isRunning) {
-                Log.e("VpnFilter", "VPN loop error: ${e.message}")
-            }
+            if (isRunning) Log.e(TAG, "VPN loop error: ${e.message}")
         }
     }
 
     private fun proxyDnsQuery(packet: ByteArray, length: Int, outputStream: FileOutputStream) {
         try {
             val ipHeaderLen = (packet[0].toInt() and 0x0F) * 4
-            val udpHeaderLen = 8
-            val dnsPayloadOffset = ipHeaderLen + udpHeaderLen
+            val dnsPayloadOffset = ipHeaderLen + 8
             val dnsQueryLength = length - dnsPayloadOffset
-
             if (dnsQueryLength <= 0) return
 
-            val dnsQueryBytes = ByteArray(dnsQueryLength)
-            System.arraycopy(packet, dnsPayloadOffset, dnsQueryBytes, 0, dnsQueryLength)
+            val dnsQueryBytes = packet.copyOfRange(dnsPayloadOffset, dnsPayloadOffset + dnsQueryLength)
 
-            val socket = DatagramSocket()
-            protect(socket)
-            
-            val upstreamDns = InetAddress.getByName("8.8.8.8")
-            val sendPacket = DatagramPacket(dnsQueryBytes, dnsQueryBytes.size, upstreamDns, 53)
-            socket.send(sendPacket)
+            DatagramSocket().use { socket ->
+                protect(socket) // чтобы запрос к 8.8.8.8 не зациклился в наш же туннель
+                socket.soTimeout = 3000
 
-            val receiveBuffer = ByteArray(1024)
-            val receivePacket = DatagramPacket(receiveBuffer, receiveBuffer.size)
-            socket.soTimeout = 3000
-            socket.receive(receivePacket)
-            socket.close()
+                val upstream = InetAddress.getByName(UPSTREAM_DNS)
+                socket.send(DatagramPacket(dnsQueryBytes, dnsQueryBytes.size, upstream, 53))
 
-            val dnsResponsePayload = receivePacket.data.copyOf(receivePacket.length)
-            val responsePacket = buildDnsResponsePacket(packet, dnsResponsePayload)
+                val receiveBuffer = ByteArray(4096)
+                val receivePacket = DatagramPacket(receiveBuffer, receiveBuffer.size)
+                socket.receive(receivePacket)
 
-            synchronized(outputStream) {
-                outputStream.write(responsePacket)
+                val dnsResponse = receivePacket.data.copyOf(receivePacket.length)
+                val responsePacket = buildDnsResponsePacket(packet, dnsResponse)
+                synchronized(writeLock) { outputStream.write(responsePacket) }
             }
         } catch (e: Exception) {
-            Log.e("VpnFilter", "DNS Proxy error: ${e.message}")
+            Log.e(TAG, "DNS Proxy error: ${e.message}")
         }
+    }
+
+    /** Формирует DNS-ответ NXDOMAIN на основе исходного запроса. */
+    private fun buildNxDomainPayload(packet: ByteArray, length: Int): ByteArray? {
+        val ipHeaderLen = (packet[0].toInt() and 0x0F) * 4
+        val dnsStart = ipHeaderLen + 8
+        if (length < dnsStart + 12) return null
+
+        // Находим конец секции Question
+        var pos = dnsStart + 12
+        while (pos < length && packet[pos].toInt() != 0) {
+            pos += (packet[pos].toInt() and 0xFF) + 1
+        }
+        pos += 1 + 4 // нулевой байт + QTYPE + QCLASS
+        if (pos > length) return null
+
+        val payload = packet.copyOfRange(dnsStart, pos)
+        payload[2] = 0x81.toByte() // QR=1 (ответ), RD=1
+        payload[3] = 0x83.toByte() // RA=1, RCODE=3 (NXDOMAIN)
+        payload[6] = 0; payload[7] = 0   // ANCOUNT = 0
+        payload[8] = 0; payload[9] = 0   // NSCOUNT = 0
+        payload[10] = 0; payload[11] = 0 // ARCOUNT = 0
+        return payload
     }
 
     private fun buildDnsResponsePacket(originalIpPacket: ByteArray, dnsResponsePayload: ByteArray): ByteArray {
@@ -171,41 +188,60 @@ class VpnFilterService : VpnService() {
         val totalLength = ipHeaderLen + 8 + dnsResponsePayload.size
         val packet = ByteArray(totalLength)
 
+        // IP-заголовок: копируем, меняем длину и меняем местами src/dst
         System.arraycopy(originalIpPacket, 0, packet, 0, ipHeaderLen)
         packet[2] = (totalLength shr 8).toByte()
         packet[3] = (totalLength and 0xFF).toByte()
-
         System.arraycopy(originalIpPacket, 16, packet, 12, 4)
         System.arraycopy(originalIpPacket, 12, packet, 16, 4)
 
-        val udpSrcOffset = ipHeaderLen
-        val udpDstOffset = ipHeaderLen + 2
-        val udpLenOffset = ipHeaderLen + 4
-        val udpChkOffset = ipHeaderLen + 6
+        // ГЛАВНОЕ ИСПРАВЛЕНИЕ: пересчитываем контрольную сумму IP-заголовка
+        packet[10] = 0
+        packet[11] = 0
+        val checksum = ipChecksum(packet, ipHeaderLen)
+        packet[10] = (checksum shr 8).toByte()
+        packet[11] = (checksum and 0xFF).toByte()
 
-        packet[udpSrcOffset] = originalIpPacket[udpDstOffset]
-        packet[udpSrcOffset + 1] = originalIpPacket[udpDstOffset + 1]
-        packet[udpDstOffset] = originalIpPacket[udpSrcOffset]
-        packet[udpDstOffset + 1] = originalIpPacket[udpSrcOffset + 1]
+        // UDP: меняем местами порты
+        val udp = ipHeaderLen
+        packet[udp] = originalIpPacket[udp + 2]
+        packet[udp + 1] = originalIpPacket[udp + 3]
+        packet[udp + 2] = originalIpPacket[udp]
+        packet[udp + 3] = originalIpPacket[udp + 1]
 
         val udpLen = 8 + dnsResponsePayload.size
-        packet[udpLenOffset] = (udpLen shr 8).toByte()
-        packet[udpLenOffset + 1] = (udpLen and 0xFF).toByte()
-        packet[udpChkOffset] = 0
-        packet[udpChkOffset + 1] = 0
+        packet[udp + 4] = (udpLen shr 8).toByte()
+        packet[udp + 5] = (udpLen and 0xFF).toByte()
+        packet[udp + 6] = 0 // для IPv4 UDP-checksum = 0 допустим
+        packet[udp + 7] = 0
 
         System.arraycopy(dnsResponsePayload, 0, packet, ipHeaderLen + 8, dnsResponsePayload.size)
         return packet
     }
 
+    private fun ipChecksum(buf: ByteArray, headerLen: Int): Int {
+        var sum = 0
+        var i = 0
+        while (i < headerLen) {
+            sum += ((buf[i].toInt() and 0xFF) shl 8) or (buf[i + 1].toInt() and 0xFF)
+            i += 2
+        }
+        while (sum shr 16 != 0) {
+            sum = (sum and 0xFFFF) + (sum shr 16)
+        }
+        return sum.inv() and 0xFFFF
+    }
+
     private fun isDnsPacket(packet: ByteArray, length: Int): Boolean {
         if (length < 28) return false
+        if ((packet[0].toInt() shr 4) and 0x0F != 4) return false // только IPv4
         val ipHeaderLength = (packet[0].toInt() and 0x0F) * 4
+        if (length < ipHeaderLength + 8) return false
         val protocol = packet[9].toInt() and 0xFF
-        if (protocol != 17) return false
+        if (protocol != 17) return false // только UDP
 
         val destinationPort = ((packet[ipHeaderLength + 2].toInt() and 0xFF) shl 8) or
-                              (packet[ipHeaderLength + 3].toInt() and 0xFF)
+                (packet[ipHeaderLength + 3].toInt() and 0xFF)
         return destinationPort == 53
     }
 
@@ -213,20 +249,21 @@ class VpnFilterService : VpnService() {
         try {
             val ipHeaderLength = (packet[0].toInt() and 0x0F) * 4
             var dnsOffset = ipHeaderLength + 8 + 12
-            
-            val domainBuilder = StringBuilder()
+
+            val sb = StringBuilder()
             while (dnsOffset < length) {
                 val labelLength = packet[dnsOffset].toInt() and 0xFF
                 if (labelLength == 0) break
-                
-                if (domainBuilder.isNotEmpty()) domainBuilder.append(".")
+                if (dnsOffset + labelLength >= length) return null
+
+                if (sb.isNotEmpty()) sb.append('.')
                 for (i in 0 until labelLength) {
                     dnsOffset++
-                    domainBuilder.append(packet[dnsOffset].toInt().toChar())
+                    sb.append((packet[dnsOffset].toInt() and 0xFF).toChar())
                 }
                 dnsOffset++
             }
-            return if (domainBuilder.isNotEmpty()) domainBuilder.toString() else null
+            return if (sb.isNotEmpty()) sb.toString() else null
         } catch (e: Exception) {
             return null
         }
@@ -238,7 +275,7 @@ class VpnFilterService : VpnService() {
             vpnInterface?.close()
             vpnInterface = null
         } catch (e: Exception) {
-            Log.e("VpnFilter", "Error closing interface: ${e.message}")
+            Log.e(TAG, "Error closing interface: ${e.message}")
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
