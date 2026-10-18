@@ -26,7 +26,7 @@ pub fn is_domain_blocked(domain: &str) -> bool {
     let lowered = domain.trim().to_lowercase();
     let mut current: &str = lowered.strip_suffix('.').unwrap_or(&lowered);
 
-    // Проверяем сам домен и все его родительские домены:
+    // Проверяем сам домен и все родительские:
     // a.b.pornhub.com -> b.pornhub.com -> pornhub.com
     loop {
         if BLOCKED_DOMAINS.contains(current) {

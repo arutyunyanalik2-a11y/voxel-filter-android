@@ -37,6 +37,7 @@ class VpnFilterService : VpnService() {
     external fun checkDomainNative(domain: String): Boolean
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Log.i(TAG, "onStartCommand action=${intent?.action}")
         if (intent?.action == "STOP_VPN") {
             stopVpn()
             return START_NOT_STICKY
@@ -72,26 +73,32 @@ class VpnFilterService : VpnService() {
 
     private fun startVpn() {
         try {
-            // Маршрутизируем в туннель ТОЛЬКО трафик к нашему DNS (10.0.0.2).
-            // Весь остальной трафик идёт мимо VPN напрямую.
+            // В туннель попадает только трафик к нашему DNS (10.0.0.2).
+            // Весь остальной трафик идёт напрямую, мимо VPN.
             val builder = Builder()
                 .setSession("Voxel Rivo Filter")
                 .addAddress(VPN_ADDRESS, 24)
                 .addDnsServer(VPN_ADDRESS)
                 .addRoute(VPN_ADDRESS, 32)
 
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                builder.setMetered(false)
+            }
+
             vpnInterface = builder.establish()
 
             if (vpnInterface == null) {
-                Log.e(TAG, "builder.establish() returned null")
+                Log.e(TAG, "builder.establish() returned null (нет разрешения VPN?)")
                 isRunning = false
                 return
             }
 
+            setUnderlyingNetworks(null)
+
             Log.i(TAG, "DNS VPN Tunnel active")
             Thread { runVpnLoop() }.start()
         } catch (e: Exception) {
-            Log.e(TAG, "Error starting VPN: ${e.message}")
+            Log.e(TAG, "Error starting VPN: ${e.message}", e)
             isRunning = false
         }
     }
@@ -105,7 +112,8 @@ class VpnFilterService : VpnService() {
         try {
             while (isRunning) {
                 val length = inputStream.read(buffer)
-                if (length <= 0) continue
+                if (length < 0) break
+                if (length == 0) continue
 
                 val packet = buffer.copyOf(length)
 
@@ -113,8 +121,10 @@ class VpnFilterService : VpnService() {
                 if (!isDnsPacket(packet, length)) continue
 
                 val domain = extractDomainFromDns(packet, length)
+                Log.i(TAG, "DNS query: $domain")
+
                 if (domain != null && checkDomainNative(domain.lowercase())) {
-                    Log.d(TAG, "BLOCKED 18+ domain: $domain")
+                    Log.i(TAG, "BLOCKED 18+ domain: $domain")
                     // Отвечаем NXDOMAIN, чтобы приложение сразу получило ошибку, а не ждало таймаут
                     val nx = buildNxDomainPayload(packet, length)
                     if (nx != null) {
@@ -127,7 +137,7 @@ class VpnFilterService : VpnService() {
                 executor.submit { proxyDnsQuery(packet, length, outputStream) }
             }
         } catch (e: Exception) {
-            if (isRunning) Log.e(TAG, "VPN loop error: ${e.message}")
+            if (isRunning) Log.e(TAG, "VPN loop error: ${e.message}", e)
         }
     }
 
@@ -226,7 +236,7 @@ class VpnFilterService : VpnService() {
             sum += ((buf[i].toInt() and 0xFF) shl 8) or (buf[i + 1].toInt() and 0xFF)
             i += 2
         }
-        while (sum shr 16 != 0) {
+        while ((sum shr 16) != 0) {
             sum = (sum and 0xFFFF) + (sum shr 16)
         }
         return sum.inv() and 0xFFFF
@@ -234,7 +244,7 @@ class VpnFilterService : VpnService() {
 
     private fun isDnsPacket(packet: ByteArray, length: Int): Boolean {
         if (length < 28) return false
-        if ((packet[0].toInt() shr 4) and 0x0F != 4) return false // только IPv4
+        if (((packet[0].toInt() shr 4) and 0x0F) != 4) return false // только IPv4
         val ipHeaderLength = (packet[0].toInt() and 0x0F) * 4
         if (length < ipHeaderLength + 8) return false
         val protocol = packet[9].toInt() and 0xFF
