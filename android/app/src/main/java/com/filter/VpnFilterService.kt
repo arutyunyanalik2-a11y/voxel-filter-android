@@ -30,7 +30,8 @@ class VpnFilterService : VpnService() {
         private const val TAG = "VpnFilter"
         private const val CHANNEL_ID = "VoxelRivoChannel"
         private const val NOTIFICATION_ID = 1
-        private const val VPN_ADDRESS = "10.0.0.2"
+        private const val VPN_ADDRESS = "10.0.0.1"   // адрес самого телефона в туннеле
+        private const val DNS_ADDRESS = "10.0.0.2"   // «виртуальный DNS», сюда идут запросы
         private const val UPSTREAM_DNS = "8.8.8.8"
     }
 
@@ -73,13 +74,13 @@ class VpnFilterService : VpnService() {
 
     private fun startVpn() {
         try {
-            // В туннель попадает только трафик к нашему DNS (10.0.0.2).
+            // В туннель попадает только трафик к виртуальному DNS (10.0.0.2).
             // Весь остальной трафик идёт напрямую, мимо VPN.
             val builder = Builder()
                 .setSession("Voxel Rivo Filter")
                 .addAddress(VPN_ADDRESS, 24)
-                .addDnsServer(VPN_ADDRESS)
-                .addRoute(VPN_ADDRESS, 32)
+                .addDnsServer(DNS_ADDRESS)
+                .addRoute(DNS_ADDRESS, 32)
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 builder.setMetered(false)
@@ -116,6 +117,7 @@ class VpnFilterService : VpnService() {
                 if (length == 0) continue
 
                 val packet = buffer.copyOf(length)
+                Log.d(TAG, "packet len=$length proto=${packet[9].toInt() and 0xFF}")
 
                 // Всё, что не является UDP DNS-запросом, отбрасываем
                 if (!isDnsPacket(packet, length)) continue
@@ -205,7 +207,7 @@ class VpnFilterService : VpnService() {
         System.arraycopy(originalIpPacket, 16, packet, 12, 4)
         System.arraycopy(originalIpPacket, 12, packet, 16, 4)
 
-        // ГЛАВНОЕ ИСПРАВЛЕНИЕ: пересчитываем контрольную сумму IP-заголовка
+        // Пересчитываем контрольную сумму IP-заголовка
         packet[10] = 0
         packet[11] = 0
         val checksum = ipChecksum(packet, ipHeaderLen)
