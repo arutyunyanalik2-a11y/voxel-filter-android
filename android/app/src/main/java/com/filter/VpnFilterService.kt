@@ -72,8 +72,8 @@ class VpnFilterService : VpnService() {
             val builder = Builder()
                 .setSession("Voxel Rivo Filter")
                 .addAddress("10.0.0.2", 24)
-                .addDnsServer("10.0.0.2") // Указываем наш локальный IP как DNS
-                .addRoute("10.0.0.2", 32) // Маршрутизируем ТОЛЬКО наш DNS-трафик, не трогая весь остальной интернет!
+                .addDnsServer("10.0.0.2")
+                .addRoute("10.0.0.2", 32)
 
             vpnInterface = builder.establish()
 
@@ -103,15 +103,23 @@ class VpnFilterService : VpnService() {
                     
                     if (isDnsPacket(packet, length)) {
                         val domain = extractDomainFromDns(packet, length)
-                        if (domain != null && checkDomainNative(domain)) {
-                            Log.d("VpnFilter", "BLOCKED 18+ domain: $domain")
-                            continue // Блокируем: не отвечаем на DNS запрос
+                        if (domain != null) {
+                            val cleanDomain = domain.lowercase()
+
+                            // Единственная проверка: если домен в черном списке Rust — блокируем
+                            if (checkDomainNative(cleanDomain)) {
+                                Log.d("VpnFilter", "BLOCKED 18+ domain: $cleanDomain")
+                                continue // Не отвечаем на запрос, сайт блокируется
+                            }
                         }
 
-                        // Если домен разрешен — отправляем запрос на реальный 8.8.8.8 через защищенный сокет
+                        // Все остальные сайты и приложения мгновенно проксируем в интернет
                         executor.submit {
                             proxyDnsQuery(packet, length, outputStream)
                         }
+                    } else {
+                        // Не-DNS трафик пропускаем напрямую
+                        outputStream.write(packet, 0, length)
                     }
                 }
             }
@@ -135,7 +143,7 @@ class VpnFilterService : VpnService() {
             System.arraycopy(packet, dnsPayloadOffset, dnsQueryBytes, 0, dnsQueryLength)
 
             val socket = DatagramSocket()
-            protect(socket) // Защищаем сокет от зацикливания в VPN
+            protect(socket)
             
             val upstreamDns = InetAddress.getByName("8.8.8.8")
             val sendPacket = DatagramPacket(dnsQueryBytes, dnsQueryBytes.size, upstreamDns, 53)
